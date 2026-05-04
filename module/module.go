@@ -10,6 +10,7 @@ import (
 type OTPRequest struct {
 	Email string `json:"email"`
 	Otp   string `json:"otp"`
+	Type  string `json:"type"`
 }
 
 type SignupRequest struct {
@@ -27,6 +28,16 @@ type LoginRequest struct {
 type ResetPasswordRequest struct {
 	Email       string `json:"email"`
 	NewPassword string `json:"newPassword"`
+}
+
+type ItemRequest struct {
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Price       float64 `json:"price"`
+	Image       string  `json:"image"`
+	Images      []string `json:"images"`
+	CreatedBy   string  `json:"created_by"`
+	DiscountPercentage float64 `json:"discountpercentage"`
 }
 
 // Hash password before saving

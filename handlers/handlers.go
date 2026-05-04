@@ -11,6 +11,7 @@ import (
 	"grameenkart/db"
 	"grameenkart/module"
 	"net/http"
+	"github.com/lib/pq"
 )
 
 func SignupHandler(w http.ResponseWriter, r *http.Request) {
@@ -119,16 +120,17 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 func SendOTPHandler(w http.ResponseWriter, r *http.Request) {
 	var req module.OTPRequest
 	json.NewDecoder(r.Body).Decode(&req)
-
 	if req.Email == "" {
 		http.Error(w, "Email required", 400)
 		return
 	}
+	if req.Type == "" {
+		req.Type = "resetpassword"
+	}
+
 	rand.Seed(time.Now().UnixNano())
 	otp := fmt.Sprintf("%06d", rand.Intn(1000000))
-
 	expiry := time.Now().Add(5 * time.Minute)
-
 	query := `
 		INSERT INTO email_otp (email, otp, expires_at)
 		VALUES ($1, $2, $3)
@@ -142,14 +144,12 @@ func SendOTPHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "DB error", 500)
 		return
 	}
-
-	err = SendEmail(req.Email, otp)
+	err = SendEmail(req.Email, otp, req.Type)
 	if err != nil {
 		fmt.Println("Email error:", err)
 		http.Error(w, "Failed to send email", 500)
 		return
 	}
-
 	json.NewEncoder(w).Encode(map[string]string{
 		"message": "OTP sent to email",
 	})
@@ -190,29 +190,66 @@ func VerifyOTPHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func SendEmail(to string, otp string) error {
+func SendEmail(to string, otp string, usertype string) error {
 	from := os.Getenv("EMAIL_SENDER")
 	password := os.Getenv("EMAIL_PASSWORD")
-
 	smtpHost := "smtp.gmail.com"
 	smtpPort := "587"
 
+	var subject string
+	var body string
+	if usertype == "resetpassword" {
+		subject = "GrameenKart Password Reset OTP"
+		body = fmt.Sprintf(`
+		<html>
+		<body style="font-family: Arial, sans-serif; background-color:#f4f4f4; padding:20px;">
+			<div style="max-width:500px; margin:auto; background:white; padding:20px; border-radius:10px;">
+				<h2 style="color:#2e7d32; text-align:center;">GrameenKart</h2>
+				<p>Hello,</p>
+				<p>You requested to reset your password.</p>
+				<p>Your OTP for password reset is:</p>
+				<div style="text-align:center; margin:20px 0;"><span style="font-size:28px; font-weight:bold; letter-spacing:5px;">%s</span>
+				</div>
+				<p>This OTP is valid for <b>5 minutes</b>.</p>
+				<p style="color:red;"><b>⚠️ Do NOT share this OTP with anyone.</b></p>
+				<p>If you did NOT request a password reset, please ignore this email.</p>
+				<hr/>
+				<p style="font-size:12px; color:#888; text-align:center;">© 2026 GrameenKart. All rights reserved.</p>
+			</div>
+		</body>
+		</html>
+		`, otp)
+
+	} else {
+		subject = "GrameenKart OTP Verification"
+		body = fmt.Sprintf(`
+		<html>
+		<body style="font-family: Arial, sans-serif; background-color:#f4f4f4; padding:20px;">
+			<div style="max-width:500px; margin:auto; background:white; padding:20px; border-radius:10px;">
+				<h2 style="color:#2e7d32; text-align:center;">GrameenKart</h2>
+				<p>Hello,</p>
+				<p>Your One-Time Password (OTP) for account verification is:</p>
+				<div style="text-align:center; margin:20px 0;"><span style="font-size:28px; font-weight:bold; letter-spacing:5px;">%s</span></div>
+				<p>This OTP is valid for <b>5 minutes</b>.</p>
+				<p style="color:red;"><b>⚠️ Do NOT share this OTP with anyone.</b></p>
+				<p>If you did not request this, please ignore this email.</p>
+				<hr/>
+				<p style="font-size:12px; color:#888; text-align:center;">© 2026 GrameenKart. All rights reserved.</p>
+			</div>
+		</body>
+		</html>
+		`, otp)
+	}
 	msg := []byte(fmt.Sprintf(
-		"Subject: GrameenKart OTP Verification\r\n"+
-			"MIME-version: 1.0;\r\nContent-Type: text/plain; charset=\"UTF-8\";\r\n\r\n"+
-			"Your OTP is: %s\nValid for 5 minutes.",
-		otp,
+		"Subject: %s\r\n"+
+			"MIME-version: 1.0;\r\n"+
+			"Content-Type: text/html; charset=\"UTF-8\";\r\n\r\n"+
+			"%s",
+		subject,
+		body,
 	))
-
 	auth := smtp.PlainAuth("", from, password, smtpHost)
-
-	return smtp.SendMail(
-		smtpHost+":"+smtpPort,
-		auth,
-		from,
-		[]string{to},
-		msg,
-	)
+	return smtp.SendMail(smtpHost+":"+smtpPort,auth,from,[]string{to},msg,)
 }
 
 func ResetPasswordHandler(w http.ResponseWriter, r *http.Request) {
@@ -254,5 +291,109 @@ func ResetPasswordHandler(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(map[string]string{
 		"message": "Password updated successfully",
+	})
+}
+
+func GetItemsHandler(w http.ResponseWriter, r *http.Request) {
+	rows, err := db.DB.Query(`
+		SELECT id, name, price, description, image, created_by, discountpercentage, images, created_at
+		FROM items ORDER BY created_at DESC
+	`)
+	if err != nil {
+		http.Error(w, "DB error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	var items []map[string]interface{}
+
+	for rows.Next() {
+		var id int
+		var name, desc, image, createdBy string
+		var price float64
+		var discount float64
+		var images []string
+		var createdAt time.Time
+
+		err := rows.Scan(
+			&id,
+			&name,
+			&price,
+			&desc,
+			&image,
+			&createdBy,
+			&discount,
+			pq.Array(&images),
+			&createdAt,
+		)
+
+		if err != nil {
+			http.Error(w, "Scan error", http.StatusInternalServerError)
+			return
+		}
+
+		items = append(items, map[string]interface{}{
+			"id": id,
+			"name": name,
+			"price": price,
+			"description": desc,
+			"image": image,
+			"images": images,
+			"created_by": createdBy,
+			"discountpercentage": discount,
+			"created_at": createdAt,
+		})
+	}
+
+	json.NewEncoder(w).Encode(items)
+}
+
+func InsertItemHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req module.ItemRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Name == "" || req.Price <= 0 || req.CreatedBy == "" {
+		http.Error(w, "Name, Price and CreatedBy are required", http.StatusBadRequest)
+		return
+	}
+
+	query := `
+	INSERT INTO items (name, description, price, image, images, created_by, discountpercentage)
+	VALUES ($1, $2, $3, $4, $5, $6, $7)
+	RETURNING id, created_at
+	`
+
+	var id int
+	var createdAt time.Time
+
+	err = db.DB.QueryRow(
+		query,
+		req.Name,
+		req.Description,
+		req.Price,
+		req.Image,
+		req.Images,
+		req.CreatedBy,
+		req.DiscountPercentage,
+	).Scan(&id, &createdAt)
+
+	if err != nil {
+		fmt.Println("DB Error:", err)
+		http.Error(w, "Failed to insert item", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "Item created successfully",
+		"id":      id,
+		"time":    createdAt,
 	})
 }
